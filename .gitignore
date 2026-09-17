@@ -22,7 +22,10 @@ Thumbs.db
 # Dados locais e respostas da API
 data/input/*
 !data/input/.gitkeep
+!data/input/cosmos_x_meli_consolidada.csv
 data/runs/*
 !data/runs/.gitkeep
 !data/runs/2026-09-16-cosmos-analysis/
 !data/runs/2026-09-16-cosmos-analysis/**
+!data/runs/2026-09-16-cosmos-meli-consolidated/
+!data/runs/2026-09-16-cosmos-meli-consolidated/**

@@ -9,6 +9,7 @@ page = st.navigation([
     st.Page("pages/2_categories.py", title="Categorias", url_path="categorias"),
     st.Page("pages/3_attributes.py", title="Atributos", url_path="atributos"),
     st.Page("pages/4_products.py", title="Explorar produtos", url_path="produtos"),
+    st.Page("pages/5_comparison.py", title="Cosmos x Mercado Livre", url_path="comparacao"),
 ])
-prepare_context()
+prepare_context(comparison_only=page.url_path == "comparacao")
 page.run()

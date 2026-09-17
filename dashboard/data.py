@@ -209,6 +209,8 @@ def analysis_counts(found_frame: pd.DataFrame) -> dict[str, int]:
     }
 
 
+
+
 def category_metrics(frame: pd.DataFrame) -> pd.DataFrame:
     columns = ["category", "total", "found", "notFound", "errors", "coverage", *ATTRIBUTES]
     rows = []

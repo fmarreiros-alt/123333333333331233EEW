@@ -1,0 +1,13 @@
+{
+  "status": "completed",
+  "mode": "imported-cosmos-meli-csv",
+  "source_type": "cosmos_meli_consolidated",
+  "source": "data/input/cosmos_x_meli_consolidada.csv",
+  "universe": "consolidated_csv",
+  "total": 646,
+  "processed": 646,
+  "units": {
+    "weight": "export original",
+    "dimensions": "export original"
+  }
+}

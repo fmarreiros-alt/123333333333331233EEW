@@ -8,6 +8,7 @@ import pandas as pd
 
 from data import ATTRIBUTES, aggregate, category_metrics, filter_products, list_runs, load_raw, load_run, product_frame, run_signature, valid_product
 from cosmos_export import import_cosmos_export
+from cosmos_meli_export import import_cosmos_meli_export
 
 
 def product(ean="0001234567890", category="Alimentos", status="FOUND", image=True):
@@ -59,6 +60,29 @@ class MetricsTests(unittest.TestCase):
 
 
 class LoaderTests(unittest.TestCase):
+    def test_import_cosmos_meli_export_preserves_comparison_and_raw_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "cosmos-meli.csv"
+            pd.DataFrame([
+                {
+                    "ean": "0012345678901", "entity": "Air Fryer", "cosmos_api_status": "",
+                    "cosmos_description": "Fritadeira", "cosmos_brand.name": "Marca", "cosmos_thumbnail": "https://example.test/a.png",
+                    "meli_matched": "TRUE", "meli_n_results": "2", "meli_status": "active", "meli_name": "Fritadeira Meli",
+                    "meli_gtin_matches_source": "", "meli_n_attributes": "4", "meli_n_pictures": "1", "meli_attributes": '{"BRAND":"Marca"}',
+                },
+            ]).to_csv(source, index=False)
+            run_path = import_cosmos_meli_export(source, root / "runs", "meli-import")
+            loaded = load_run(run_path)
+            product_data = loaded.products[0]
+            summary = json.loads((run_path / "summary.json").read_text())
+            raw = json.loads((run_path / "raw" / "0012345678901.json").read_text())
+            self.assertTrue(product_data["comparison"]["meliMatched"])
+            self.assertTrue(product_data["comparison"]["meliMultipleResults"])
+            self.assertIsNone(product_data["comparison"]["meliGtinMatch"])
+            self.assertEqual(summary["comparison"]["gtinMatchInformed"], 0)
+            self.assertEqual(raw["response"]["body"]["meli_attributes"], '{"BRAND":"Marca"}')
+
     def test_import_cosmos_export_creates_dashboard_run(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

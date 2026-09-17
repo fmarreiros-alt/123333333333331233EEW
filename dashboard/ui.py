@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -27,7 +28,13 @@ def clear_filters():
             del st.session_state[key]
 
 
-def prepare_context():
+def _is_comparison_run(path: Path) -> bool:
+    """Return whether a run was generated from the consolidated comparison CSV."""
+    run = load_run(path)
+    return run.metadata.get("source_type") == "cosmos_meli_consolidated"
+
+
+def prepare_context(*, comparison_only: bool = False):
     with st.sidebar:
         st.header("Cosmos Benchmark")
         st.button("Atualizar arquivos", key="refresh_files", on_click=cached_run.clear)
@@ -39,6 +46,11 @@ def prepare_context():
         if not runs:
             st.info("Nenhuma execução disponível em data/runs.")
             st.code("cd collector\nnpm run benchmark -- --input ../data/input/catalog.csv", language="powershell")
+            st.stop()
+        runs = [path for path in runs if _is_comparison_run(path) == comparison_only]
+        if not runs:
+            message = "Nenhuma execução Cosmos x Mercado Livre disponível." if comparison_only else "Nenhuma execução Cosmos disponível."
+            st.info(message)
             st.stop()
         choices = {path.name: path for path in runs}
         if st.session_state.get("selected_run") not in choices:
@@ -87,7 +99,8 @@ def prepare_context():
     if status == "running":
         st.info("A análise estará disponível quando a execução terminar ou for interrompida. Isso evita misturar arquivos durante a gravação.")
         st.stop()
-    st.caption("Cobertura = encontrados / EANs filtrados. Atributos usam somente os encontrados. Todos os gráficos e indicadores respeitam os filtros.")
+    if not comparison_only:
+        st.caption("Cobertura = encontrados / EANs filtrados. Atributos usam somente os encontrados. Todos os gráficos e indicadores respeitam os filtros.")
 
 
 def context():
@@ -239,3 +252,96 @@ def show_products():
             st.warning(error)
         else:
             st.json(raw, expanded=False)
+
+
+def show_comparison():
+    """Render the Cosmos x Mercado Livre comparison for a consolidated run."""
+    st.title("Cosmos x Mercado Livre")
+    value = require_products()
+    run = value["run"]
+    if run.metadata.get("source_type") != "cosmos_meli_consolidated":
+        st.info("Selecione uma execução importada do consolidado Cosmos x Mercado Livre para visualizar esta página.")
+        return
+
+    frame = value["frame"]
+    selected_eans = set(frame["ean"])
+    products = [product for product in run.products if product["ean"] in selected_eans]
+
+    def has_meli_result(product):
+        return product.get("comparison", {}).get("meliHasResult") is True
+
+    cosmos_runs = [path for path in list_runs(RUNS_DIR) if not _is_comparison_run(path)]
+    cosmos_run = cached_run(str(cosmos_runs[0]), run_signature(cosmos_runs[0])) if cosmos_runs else None
+    cosmos_found = [product for product in (cosmos_run.products if cosmos_run else []) if product.get("found")]
+    selected_categories = set(frame["category"])
+    cosmos_found = [product for product in cosmos_found if product["category"] in selected_categories]
+    meli_by_ean = {product["ean"]: product for product in products if has_meli_result(product)}
+
+    def has_text(value):
+        return isinstance(value, str) and bool(value.strip())
+
+    def merged_fields(product):
+        cosmos = product.get("cosmos") or {}
+        meli = product.get("meli") or {}
+        return {
+            "Descrição": has_text(cosmos.get("description")) or has_text(meli.get("name")),
+            "Imagem": has_text(cosmos.get("imageUrl")) or has_text(meli.get("first_picture_url")),
+            "Marca": has_text(cosmos.get("brand")) or has_text(meli.get("attributes")),
+        }
+
+    meli_products = [product for product in products if has_meli_result(product)]
+    counts = {
+        "universe": len(cosmos_found),
+        "meliHasResult": len(meli_by_ean),
+    }
+    st.caption("Universo: EANs encontrados no Cosmos. O Mercado Livre é cruzado pelo EAN.")
+    cards = [
+        ("Encontrados no Cosmos", counts["universe"]),
+        ("Encontrados no Meli", counts["meliHasResult"]),
+    ]
+    for column, (label, number) in zip(st.columns(len(cards)), cards):
+        column.metric(label, number)
+
+    group_rows = []
+    cosmos_groups = {}
+    for product in cosmos_found:
+        cosmos_groups.setdefault(product["category"], set()).add(product["ean"])
+    for entity, group_eans in sorted(cosmos_groups.items()):
+        group_rows.extend([
+            {"Grupo": entity, "Fonte": "Cosmos", "EANs": len(group_eans)},
+            {"Grupo": entity, "Fonte": "Mercado Livre", "EANs": len(group_eans & set(meli_by_ean))},
+        ])
+    group_chart = pd.DataFrame(group_rows)
+    st.subheader("Produtos encontrados por grupo")
+    figure = px.bar(
+        group_chart, x="Grupo", y="EANs", color="Fonte", barmode="group", text_auto=True,
+        labels={"Grupo": "Grupo", "EANs": "EANs"},
+        color_discrete_map={"Cosmos": "#62b0e8", "Mercado Livre": "#f2c14e"},
+    )
+    st.plotly_chart(figure, width="stretch")
+
+    coverage = pd.DataFrame([
+        {
+            "Grupo": entity,
+            "Cosmos": len(group_eans),
+            "Mercado Livre": len(group_eans & set(meli_by_ean)),
+        }
+        for entity, group_eans in sorted(cosmos_groups.items())
+    ])
+    st.dataframe(coverage, hide_index=True, width="stretch")
+
+    category_rows = []
+    for entity, group_eans in sorted(cosmos_groups.items()):
+        selected = [product for product in meli_products if product["ean"] in group_eans]
+        field_values = [merged_fields(product) for product in selected]
+        category_rows.append({
+            "Entidade": entity, "EANs encontrados no Meli": len(selected),
+            "Match Meli": sum(product.get("comparison", {}).get("meliMatched") is True for product in selected),
+            "Descrição ou nome": sum(values["Descrição"] for values in field_values),
+            "Imagem": sum(values["Imagem"] for values in field_values),
+            "Marca ou atributos": sum(values["Marca"] for values in field_values),
+        })
+    category = pd.DataFrame(category_rows)
+    st.subheader("Comparação por entidade")
+    st.dataframe(category, hide_index=True, width="stretch")
+
