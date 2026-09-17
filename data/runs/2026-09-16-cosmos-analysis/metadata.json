@@ -1,0 +1,11 @@
+{
+  "status": "completed",
+  "mode": "imported-csv",
+  "source": "../data/input/catalog.csv",
+  "total": 3268,
+  "processed": 3268,
+  "units": {
+    "weight": "export original",
+    "dimensions": "export original"
+  }
+}

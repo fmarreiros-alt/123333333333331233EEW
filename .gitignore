@@ -1,0 +1,28 @@
+# Credenciais e configuração local
+.env
+.env.*
+!.env.example
+
+# Node.js
+node_modules/
+dist/
+*.tsbuildinfo
+*.log
+
+# Python / Streamlit
+.venv/
+__pycache__/
+*.py[cod]
+.streamlit/secrets.toml
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Dados locais e respostas da API
+data/input/*
+!data/input/.gitkeep
+data/runs/*
+!data/runs/.gitkeep
+!data/runs/2026-09-16-cosmos-analysis/
+!data/runs/2026-09-16-cosmos-analysis/**
