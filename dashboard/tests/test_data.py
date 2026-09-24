@@ -9,6 +9,7 @@ import pandas as pd
 from data import ATTRIBUTES, aggregate, category_metrics, filter_products, list_runs, load_raw, load_run, product_frame, run_signature, valid_product
 from cosmos_export import import_cosmos_export
 from cosmos_meli_export import import_cosmos_meli_export
+from catalog_analysis import DEFAULT_DATA_DIR, category_comparison_metrics, catalog_metrics, load_sources
 
 
 def product(ean="0001234567890", category="Alimentos", status="FOUND", image=True):
@@ -57,6 +58,22 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(categories.loc["Alimentos", "image"], 50)
         self.assertEqual(categories.loc["Higiene", "errors"], 1)
         self.assertEqual(categories.loc["Higiene", "coverage"], 0)
+
+    def test_original_csv_analysis_uses_ean_presence_only(self):
+        sources = load_sources(DEFAULT_DATA_DIR)
+        metrics = catalog_metrics(sources)
+        self.assertEqual(metrics["total"], 3268)
+        self.assertEqual(metrics["cosmos_found"], 726)
+        self.assertEqual(metrics["meli_found"], 1609)
+        self.assertEqual(metrics["found_in_both"], 669)
+        categories = category_comparison_metrics(sources)
+        self.assertEqual(int(categories["cosmos_total"].sum()), 3268)
+        self.assertEqual(int(categories["cosmos_found"].sum()), 726)
+        self.assertEqual(int(categories["meli_found"].sum()), 1609)
+
+    def test_catalog_default_dir_is_repository_relative(self):
+        expected = Path(__file__).resolve().parents[2] / "data" / "catalog"
+        self.assertEqual(DEFAULT_DATA_DIR, expected)
 
 
 class LoaderTests(unittest.TestCase):

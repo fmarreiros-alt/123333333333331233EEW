@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -10,10 +11,11 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from data import (
-    ANALYSIS_METRICS, ATTRIBUTES, RUNS_DIR, STATUSES, aggregate, category_metrics, filter_products,
-    list_runs, load_raw, load_run, product_frame, run_signature,
-)
+from catalog_analysis import DEFAULT_DATA_DIR, CatalogSources, category_comparison_metrics, catalog_metrics, load_sources
+from data import ATTRIBUTES, RUNS_DIR, STATUSES, filter_products, list_runs, load_raw, load_run, product_frame, run_signature
+
+
+CATALOG_DATA_DIR = Path(os.getenv("CATALOG_DATA_DIR", str(DEFAULT_DATA_DIR))).expanduser()
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
@@ -22,19 +24,39 @@ def cached_run(path: str, signature: tuple):
     return load_run(Path(path))
 
 
+@st.cache_data(show_spinner=False)
+def cached_catalog_sources(path: str) -> CatalogSources:
+    """Cache the three source spreadsheets until the user refreshes them."""
+    return load_sources(Path(path))
+
+
 def clear_filters():
     for key in list(st.session_state):
         if key.startswith("filter_") or key in ("product_search", "product_ean"):
             del st.session_state[key]
 
 
-def _is_comparison_run(path: Path) -> bool:
-    """Return whether a run was generated from the consolidated comparison CSV."""
-    run = load_run(path)
-    return run.metadata.get("source_type") == "cosmos_meli_consolidated"
+def prepare_catalog_context() -> None:
+    """Load the shared Cosmos and Mercado Livre catalog context."""
+    with st.sidebar:
+        st.header("Catálogo")
+        st.button("Atualizar planilhas", key="refresh_catalog_files", on_click=cached_catalog_sources.clear)
+        st.caption("Fontes: eans-amostra.csv, cosmo.csv e mercado-livre.csv")
+    try:
+        sources = cached_catalog_sources(str(CATALOG_DATA_DIR))
+    except (FileNotFoundError, ValueError, pd.errors.ParserError) as error:
+        st.error(str(error))
+        st.info("Configure CATALOG_DATA_DIR para apontar para a pasta com as três planilhas.")
+        st.stop()
+    st.session_state["_catalog_context"] = sources
 
 
-def prepare_context(*, comparison_only: bool = False):
+def catalog_context() -> CatalogSources:
+    """Return the shared spreadsheet context prepared by the entrypoint."""
+    return st.session_state["_catalog_context"]
+
+
+def prepare_context():
     with st.sidebar:
         st.header("Cosmos Benchmark")
         st.button("Atualizar arquivos", key="refresh_files", on_click=cached_run.clear)
@@ -47,10 +69,8 @@ def prepare_context(*, comparison_only: bool = False):
             st.info("Nenhuma execução disponível em data/runs.")
             st.code("cd collector\nnpm run benchmark -- --input ../data/input/catalog.csv", language="powershell")
             st.stop()
-        runs = [path for path in runs if _is_comparison_run(path) == comparison_only]
         if not runs:
-            message = "Nenhuma execução Cosmos x Mercado Livre disponível." if comparison_only else "Nenhuma execução Cosmos disponível."
-            st.info(message)
+            st.info("Nenhuma execução Cosmos disponível.")
             st.stop()
         choices = {path.name: path for path in runs}
         if st.session_state.get("selected_run") not in choices:
@@ -99,8 +119,7 @@ def prepare_context(*, comparison_only: bool = False):
     if status == "running":
         st.info("A análise estará disponível quando a execução terminar ou for interrompida. Isso evita misturar arquivos durante a gravação.")
         st.stop()
-    if not comparison_only:
-        st.caption("Cobertura = encontrados / EANs filtrados. Atributos usam somente os encontrados. Todos os gráficos e indicadores respeitam os filtros.")
+    st.caption("Cobertura = encontrados / EANs filtrados. Atributos usam somente os encontrados. Todos os gráficos e indicadores respeitam os filtros.")
 
 
 def context():
@@ -115,70 +134,82 @@ def require_products():
     return value
 
 
-def category_chart(categories: pd.DataFrame, metrics: list[str], title: str):
-    labels = {"coverage": "Cobertura"}
-    melted = categories.melt(id_vars="category", value_vars=metrics, var_name="Métrica", value_name="Valor")
-    melted["Métrica"] = melted["Métrica"].map(labels)
-    figure = px.bar(melted, x="category", y="Valor", color="Métrica", barmode="group", title=title, labels={"category": "Categoria"})
-    figure.update_yaxes(range=[0, 100])
-    st.plotly_chart(figure, width="stretch")
-
-
 def show_overview():
     st.title("Visão geral")
-    value = context()
-    metrics = aggregate(value["frame"])
-    cards = [
-        ("Total de EANs", metrics["total"]), ("Encontrados", metrics["found"]),
-        ("Não encontrados", metrics["notFound"]), ("Erros", metrics["errors"]),
-        ("Cobertura", f"{metrics['coverage']:.1f}%"),
+    metrics = catalog_metrics(catalog_context())
+    st.caption("Indicadores calculados sobre o universo único de EANs da planilha eans-amostra.csv.")
+    source_cards = [
+        ("Cosmos", "cosmos_total", "cosmos_not_found", "cosmos_coverage"),
+        ("Mercado Livre", "meli_total", "meli_not_found", "meli_coverage"),
     ]
-    for group in (cards[:4], cards[4:]):
-        for column, (label, number) in zip(st.columns(len(group)), group):
-            column.metric(label, number)
-    require_products()
-    categories = category_metrics(value["frame"])
-    category_chart(categories, ["coverage"], "Cobertura por categoria (%)")
-    found = value["frame"].loc[value["frame"]["found"]]
-    if not found.empty:
-        counts = metrics["analysisCounts"]
-        attribute_counts = pd.DataFrame({"Atributo": [ANALYSIS_METRICS[key] for key in counts], "Registros": list(counts.values())})
-        figure = px.bar(attribute_counts, x="Atributo", y="Registros", title="Registros encontrados com cada atributo")
-        st.plotly_chart(figure, width="stretch")
+    for source, total_key, not_found_key, coverage_key in source_cards:
+        st.subheader(source)
+        cards = [
+            ("Total de EANs", metrics[total_key]),
+            ("Não encontrados", metrics[not_found_key]),
+            ("Cobertura", f"{metrics[coverage_key]:.2f}%"),
+        ]
+        for column, (label, value) in zip(st.columns(3), cards):
+            column.metric(label, value)
+
+    overview = pd.DataFrame([
+        {"Fonte": "Cosmos", "Cobertura": metrics["cosmos_coverage"]},
+        {"Fonte": "Mercado Livre", "Cobertura": metrics["meli_coverage"]},
+    ])
+    figure = px.bar(
+        overview,
+        x="Fonte",
+        y="Cobertura",
+        color="Fonte",
+        text_auto=".2f",
+        title="Cobertura por fonte (%)",
+        labels={"Cobertura": "Cobertura (%)", "Fonte": "Fonte"},
+        color_discrete_map={"Cosmos": "#5dade2", "Mercado Livre": "#f5c242"},
+    )
+    figure.update_yaxes(range=[0, 100])
+    st.plotly_chart(figure, width="stretch")
 
 
 def show_categories():
     st.title("Categorias")
-    categories = category_metrics(require_products()["frame"])
-    names = {"category": "Categoria", "total": "EANs", "found": "Encontrados", "notFound": "Não encontrados", "errors": "Erros", "coverage": "Cobertura (%)"}
-    table = categories[list(names)].rename(columns=names).copy()
-    sort_column = st.selectbox("Ordenar por", list(names.values()), index=5, key="category_sort")
-    descending = st.checkbox("Ordem decrescente", value=True, key="category_descending")
-    st.dataframe(table.sort_values(sort_column, ascending=not descending).round(2), hide_index=True, width="stretch")
-    st.caption("A tabela também pode ser ordenada clicando no cabeçalho de cada coluna.")
-    category_chart(categories, ["coverage"], "Cobertura por grupo (%)")
-
-
-def show_attributes():
-    st.title("Atributos")
-    frame = require_products()["frame"]
-    metrics = aggregate(frame)
-    if not metrics["found"]:
-        st.info("Não há produtos encontrados nos filtros atuais. A cobertura de atributos não pode ser calculada.")
-        return
-    coverage = pd.DataFrame({"Atributo": list(ATTRIBUTES.values()), "Cobertura (%)": list(metrics["attributeCoverage"].values())})
-    st.subheader("Cobertura global entre encontrados")
-    st.dataframe(coverage.round(2), hide_index=True, width="stretch")
-    figure = px.bar(coverage, x="Atributo", y="Cobertura (%)")
-    figure.update_yaxes(range=[0, 100])
+    categories = category_comparison_metrics(catalog_context())
+    total_eans = int(categories["cosmos_total"].sum())
+    st.metric("EANs utilizados na análise", f"{total_eans:,}".replace(",", "."))
+    st.caption("EANs encontrados por categoria. O Mercado Livre é agrupado pela categoria correspondente do Cosmos.")
+    chart_data = categories.sort_values("cosmos_total", ascending=False).melt(
+        id_vars="category",
+        value_vars=["cosmos_found", "meli_found"],
+        var_name="source",
+        value_name="EANs encontrados",
+    )
+    chart_data["source"] = chart_data["source"].map({
+        "cosmos_found": "Cosmos",
+        "meli_found": "Mercado Livre",
+    })
+    figure = px.bar(
+        chart_data,
+        x="category",
+        y="EANs encontrados",
+        color="source",
+        barmode="group",
+        text_auto=True,
+        title="EANs encontrados por categoria",
+        labels={"category": "Categoria", "source": "Fonte"},
+        color_discrete_map={"Cosmos": "#5dade2", "Mercado Livre": "#f5c242"},
+    )
+    figure.update_xaxes(tickangle=-35)
     st.plotly_chart(figure, width="stretch")
-    categories = category_metrics(frame)
-    heatmap = categories.set_index("category")[list(ATTRIBUTES)].rename(columns=ATTRIBUTES)
-    for category in categories.loc[categories["found"] == 0, "category"]:
-        heatmap.loc[category] = float("nan")
-    figure = px.imshow(heatmap, zmin=0, zmax=100, text_auto=".1f", aspect="auto", color_continuous_scale="Blues", labels={"x": "Atributo", "y": "Categoria", "color": "Cobertura (%)"}, title="Cobertura por categoria (%)")
-    st.plotly_chart(figure, width="stretch")
-    st.caption("Células vazias representam categorias sem produtos encontrados; 0% significa que nenhum encontrado possui o atributo.")
+
+    table = categories.rename(columns={
+        "category": "Categoria",
+        "cosmos_total": "Cosmos total",
+        "cosmos_found": "Cosmos encontrados",
+        "cosmos_coverage": "Cosmos cobertura (%)",
+        "meli_total": "Mercado Livre total",
+        "meli_found": "Mercado Livre encontrados",
+        "meli_coverage": "Mercado Livre cobertura (%)",
+    })
+    st.dataframe(table.round(2), hide_index=True, width="stretch")
 
 
 def show_product_fields(title: str, product: dict | None):
@@ -252,96 +283,3 @@ def show_products():
             st.warning(error)
         else:
             st.json(raw, expanded=False)
-
-
-def show_comparison():
-    """Render the Cosmos x Mercado Livre comparison for a consolidated run."""
-    st.title("Cosmos x Mercado Livre")
-    value = require_products()
-    run = value["run"]
-    if run.metadata.get("source_type") != "cosmos_meli_consolidated":
-        st.info("Selecione uma execução importada do consolidado Cosmos x Mercado Livre para visualizar esta página.")
-        return
-
-    frame = value["frame"]
-    selected_eans = set(frame["ean"])
-    products = [product for product in run.products if product["ean"] in selected_eans]
-
-    def has_meli_result(product):
-        return product.get("comparison", {}).get("meliHasResult") is True
-
-    cosmos_runs = [path for path in list_runs(RUNS_DIR) if not _is_comparison_run(path)]
-    cosmos_run = cached_run(str(cosmos_runs[0]), run_signature(cosmos_runs[0])) if cosmos_runs else None
-    cosmos_found = [product for product in (cosmos_run.products if cosmos_run else []) if product.get("found")]
-    selected_categories = set(frame["category"])
-    cosmos_found = [product for product in cosmos_found if product["category"] in selected_categories]
-    meli_by_ean = {product["ean"]: product for product in products if has_meli_result(product)}
-
-    def has_text(value):
-        return isinstance(value, str) and bool(value.strip())
-
-    def merged_fields(product):
-        cosmos = product.get("cosmos") or {}
-        meli = product.get("meli") or {}
-        return {
-            "Descrição": has_text(cosmos.get("description")) or has_text(meli.get("name")),
-            "Imagem": has_text(cosmos.get("imageUrl")) or has_text(meli.get("first_picture_url")),
-            "Marca": has_text(cosmos.get("brand")) or has_text(meli.get("attributes")),
-        }
-
-    meli_products = [product for product in products if has_meli_result(product)]
-    counts = {
-        "universe": len(cosmos_found),
-        "meliHasResult": len(meli_by_ean),
-    }
-    st.caption("Universo: EANs encontrados no Cosmos. O Mercado Livre é cruzado pelo EAN.")
-    cards = [
-        ("Encontrados no Cosmos", counts["universe"]),
-        ("Encontrados no Meli", counts["meliHasResult"]),
-    ]
-    for column, (label, number) in zip(st.columns(len(cards)), cards):
-        column.metric(label, number)
-
-    group_rows = []
-    cosmos_groups = {}
-    for product in cosmos_found:
-        cosmos_groups.setdefault(product["category"], set()).add(product["ean"])
-    for entity, group_eans in sorted(cosmos_groups.items()):
-        group_rows.extend([
-            {"Grupo": entity, "Fonte": "Cosmos", "EANs": len(group_eans)},
-            {"Grupo": entity, "Fonte": "Mercado Livre", "EANs": len(group_eans & set(meli_by_ean))},
-        ])
-    group_chart = pd.DataFrame(group_rows)
-    st.subheader("Produtos encontrados por grupo")
-    figure = px.bar(
-        group_chart, x="Grupo", y="EANs", color="Fonte", barmode="group", text_auto=True,
-        labels={"Grupo": "Grupo", "EANs": "EANs"},
-        color_discrete_map={"Cosmos": "#62b0e8", "Mercado Livre": "#f2c14e"},
-    )
-    st.plotly_chart(figure, width="stretch")
-
-    coverage = pd.DataFrame([
-        {
-            "Grupo": entity,
-            "Cosmos": len(group_eans),
-            "Mercado Livre": len(group_eans & set(meli_by_ean)),
-        }
-        for entity, group_eans in sorted(cosmos_groups.items())
-    ])
-    st.dataframe(coverage, hide_index=True, width="stretch")
-
-    category_rows = []
-    for entity, group_eans in sorted(cosmos_groups.items()):
-        selected = [product for product in meli_products if product["ean"] in group_eans]
-        field_values = [merged_fields(product) for product in selected]
-        category_rows.append({
-            "Entidade": entity, "EANs encontrados no Meli": len(selected),
-            "Match Meli": sum(product.get("comparison", {}).get("meliMatched") is True for product in selected),
-            "Descrição ou nome": sum(values["Descrição"] for values in field_values),
-            "Imagem": sum(values["Imagem"] for values in field_values),
-            "Marca ou atributos": sum(values["Marca"] for values in field_values),
-        })
-    category = pd.DataFrame(category_rows)
-    st.subheader("Comparação por entidade")
-    st.dataframe(category, hide_index=True, width="stretch")
-
